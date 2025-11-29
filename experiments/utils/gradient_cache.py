@@ -176,9 +176,16 @@ class GradientCache:
         if self.pin_memory and torch.cuda.is_available():
             data_cpu = data_cpu.pin_memory()
 
-        # LRU eviction - cache size based on number of batches (cache all if possible)
-        max_cache_size = max(10, self.get_num_batch_files())
-        if len(self._disk_batch_cache) >= max_cache_size:
+        # LRU eviction - STRICT memory limit to prevent OOM
+        # For large models (e.g., MusicTransformer with 13M params), each batch of 128
+        # samples can be ~6.6GB. We limit cache to ~4GB to stay safe.
+        MAX_CACHE_RAM_GB = 4.0
+        bytes_per_batch = data_cpu.element_size() * data_cpu.numel()
+        max_batches_by_memory = max(1, int((MAX_CACHE_RAM_GB * 1e9) / bytes_per_batch))
+        # Hard cap at 4 batches regardless of size (for very small batches)
+        max_cache_size = min(4, max_batches_by_memory)
+
+        while len(self._disk_batch_cache) >= max_cache_size:
             oldest_key = next(iter(self._disk_batch_cache))
             del self._disk_batch_cache[oldest_key]
 
@@ -298,7 +305,7 @@ class GradientCache:
 
     def is_valid(self, expected_samples: Optional[int] = None) -> bool:
         """
-        Check if disk cache is valid and complete.
+        Check if cache is valid and complete.
 
         Note: This method loads metadata as a side effect when returning True.
         Callers should NOT call load_metadata() again after this returns True.
@@ -356,7 +363,7 @@ class GradientCache:
             "cpu": "CPU RAM",
             "disk": f"disk ({self._disk_cache_dir})",
         }
-        print(f"Computing {len(indices)} gradients, storing in {mode_desc[self.offload]}...")
+        print(f"Setting up {len(indices)} gradients with {mode_desc[self.offload]}...")
 
         model = model.to(device)
         model.eval()
@@ -392,7 +399,7 @@ class GradientCache:
         else:  # disk
             self._storage_device = "cpu"  # Disk reads go through CPU
 
-        # Collect gradients
+        # Collect gradients for storage modes
         if self.offload == "disk":
             self._store_gradients_disk(
                 grad_func, params, dataset, indices, device, model_type, batch_size

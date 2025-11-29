@@ -507,9 +507,8 @@ def run_lambda_sweep(
         # We have UT_Kcross_T = U^T @ K_cross^T, so:
         # Scores^T = U @ (inv_diag * UT_Kcross_T)
         val_scores_T = U @ (inv_diag.unsqueeze(1) * UT_Kval_T)
-        val_scores = val_scores_T.T  # (n_val, n_train)
-
-        val_lds_score = lds(val_scores, val_gt)[0]
+        # lds expects (n_train, n_val), which is val_scores_T
+        val_lds_score = lds(val_scores_T, val_gt)[0]
         mean_val_lds = torch.mean(val_lds_score[~torch.isnan(val_lds_score)]).item()
 
         results["lambda_values"].append(lamb)
@@ -521,15 +520,14 @@ def run_lambda_sweep(
 
         print(f"    λ = {lamb:.1e}: Val LDS = {mean_val_lds:.4f}")
 
-        del val_scores, val_scores_T, val_lds_score
+        del val_scores_T, val_lds_score
 
     # Evaluate best λ on test set
     n_lamb = n_train * best_lambda
     inv_diag = 1.0 / (eigenvalues + n_lamb)
     test_scores_T = U @ (inv_diag.unsqueeze(1) * UT_Ktest_T)
-    test_scores = test_scores_T.T
-
-    test_lds_score = lds(test_scores, test_gt)[0]
+    # lds expects (n_train, n_test), which is test_scores_T
+    test_lds_score = lds(test_scores_T, test_gt)[0]
     mean_test_lds = torch.mean(test_lds_score[~torch.isnan(test_lds_score)]).item()
 
     results["best_lambda"] = best_lambda
@@ -539,7 +537,7 @@ def run_lambda_sweep(
     print(f"\n  Best λ = {best_lambda:.1e}: Val LDS = {best_val_lds:.4f}, Test LDS = {mean_test_lds:.4f}")
 
     del eigenvalues, U, UT_Kval_T, UT_Ktest_T, K_val_cross, K_test_cross
-    del test_scores, test_scores_T, test_lds_score
+    del test_scores_T, test_lds_score
     clear_memory(device)
 
     return results
@@ -879,7 +877,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="mnist",
                        choices=["mnist", "cifar2", "maestro"])
     parser.add_argument("--model", type=str, default="mlp",
-                       choices=["mlp", "resnet9", "musictransformer"])
+                       choices=["lr", "mlp", "resnet9", "musictransformer"])
     parser.add_argument("--mode", type=str, default="full",
                        choices=["full", "lambda_sweep", "m_sweep"],
                        help="Run mode: full comparison, just λ sweep, or just m sweep")
@@ -917,8 +915,8 @@ def main():
     print("="*60 + "\n")
 
     # Define search spaces
-    lambda_values = [1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0]
-    m_values = [64, 512, 4096, 32768, 262144, 2097152]
+    lambda_values = [1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4]
+    m_values = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288]
 
     # Save results with organized directory structure
     experiment_dir = os.path.join(args.output_dir, "hyperparam_selection")

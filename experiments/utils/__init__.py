@@ -9,8 +9,9 @@ from .fisher_utils import (
     compute_eigenvalues,
     compute_effective_dimension,
     estimate_effective_dimension,
-    # Gram matrix
+    # Gram matrix and cross-kernel
     compute_gram_matrix,
+    compute_cross_kernel,
     # Sandwich bounds (unified interface)
     compute_sandwich_bounds,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "compute_effective_dimension",
     "estimate_effective_dimension",
     "compute_gram_matrix",
+    "compute_cross_kernel",
     # Sandwich bounds
     "compute_sandwich_bounds",
     # Gradient cache
