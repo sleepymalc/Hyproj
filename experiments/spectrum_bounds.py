@@ -93,19 +93,42 @@ def precompute_woodbury(
     # Step 3: SVD of PG to get eigenvalues/eigenvectors of K_proj
     # K_proj = (1/n) PG @ PG.T = (1/n) U_svd @ diag(S²) @ U_svd.T
     # So eigenvalues = S² / n (always non-negative!) and eigenvectors = U_svd
-    PG_device = PG_cpu.to(device)
 
-    # Check for NaN/inf values before SVD
-    if torch.isnan(PG_device).any() or torch.isinf(PG_device).any():
-        nan_count = torch.isnan(PG_device).sum().item()
-        inf_count = torch.isinf(PG_device).sum().item()
-        raise ValueError(f"PG contains {nan_count} NaN and {inf_count} inf values before SVD")
+    # Heuristic: If matrix is too large (e.g. > 200M elements), force CPU SVD
+    # This prevents OOM and cuSolver 32-bit integer overflow issues.
+    # 200M float32 elements is ~800MB, a safe conservative threshold.
+    use_cpu_svd = PG_cpu.numel() > 2e8
 
-    # Try GPU SVD first, fall back to CPU if cusolver fails
-    try:
-        U_svd, S, Vh = torch.linalg.svd(PG_device, full_matrices=False)
-    except torch._C._LinAlgError as e:
-        print(f"  GPU SVD failed ({e}), falling back to CPU...")
+    if not use_cpu_svd:
+        try:
+            # Try moving to device (inside try block to catch OOM)
+            PG_device = PG_cpu.to(device)
+
+            # Check for NaN/inf values before SVD on GPU
+            if torch.isnan(PG_device).any() or torch.isinf(PG_device).any():
+                nan_count = torch.isnan(PG_device).sum().item()
+                inf_count = torch.isinf(PG_device).sum().item()
+                raise ValueError(f"PG contains {nan_count} NaN and {inf_count} inf values")
+
+            U_svd, S, Vh = torch.linalg.svd(PG_device, full_matrices=False)
+
+        except (torch.cuda.OutOfMemoryError, RuntimeError, torch._C._LinAlgError, ValueError) as e:
+            # Catch OOM, cuSolver errors (RuntimeError/LinAlgError), or our NaN check
+            print(f"  GPU SVD/Alloc failed ({e}), falling back to CPU...")
+            use_cpu_svd = True
+
+            # Attempt to free GPU memory if allocation succeeded partially
+            if 'PG_device' in locals():
+                del PG_device
+                torch.cuda.empty_cache()
+
+    if use_cpu_svd:
+        # Check for NaN/inf on CPU if we skipped GPU check
+        if torch.isnan(PG_cpu).any() or torch.isinf(PG_cpu).any():
+            nan_count = torch.isnan(PG_cpu).sum().item()
+            inf_count = torch.isinf(PG_cpu).sum().item()
+            raise ValueError(f"PG contains {nan_count} NaN and {inf_count} inf values before SVD")
+
         U_svd, S, Vh = torch.linalg.svd(PG_cpu, full_matrices=False)
         U_svd = U_svd.to(device)
         S = S.to(device)
@@ -488,9 +511,9 @@ def main():
     parser.add_argument("--min_m", type=int, default=1,
                        help="Minimum projection dimension to avoid numerical degeneracy. "
                             "When mult * d_λ < min_m, m is clamped to min_m. (default: 1)")
-    parser.add_argument("--min_d_lambda", type=float, default=5.0,
+    parser.add_argument("--min_d_lambda", type=float, default=1.0,
                        help="Skip λ values where d_λ < this threshold (numerically degenerate). "
-                            "(default: 5.0)")
+                            "(default: 1.0)")
 
     args = parser.parse_args()
 
@@ -544,8 +567,8 @@ def main():
         )
 
     # Experiment configuration
-    lambda_values = [1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3]
-    m_multipliers = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0]
+    lambda_values = [1e-8, 1e-7, 1e-6, 1e-5]
+    m_multipliers = [0.25, 0.5, 1.0, 2.0]
 
     # Run experiment
     results = run_experiment(

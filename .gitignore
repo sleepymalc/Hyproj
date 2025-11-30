@@ -38,7 +38,7 @@ dist
 *.pt
 *.slurm
 *.arrow
-*.png
+# *.png
 *.pdf
 *.tex
 *.nfs*
@@ -53,7 +53,7 @@ dist
 *debug*
 
 # all files in result folder
-*/result/*
+# */result/*
 */save/*
 */_save/*
 # all files in checkpoints folder
