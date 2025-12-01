@@ -44,7 +44,7 @@ dist
 *.nfs*
 *.pickle
 
-*/log
+*/log/*
 */data/train
 */data/eval
 */out
