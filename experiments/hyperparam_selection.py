@@ -446,8 +446,16 @@ def run_experiment(
     # Load benchmark
     model_details, groundtruth = load_benchmark(model=model_name, dataset=dataset, metric="lds")
 
-    # Count model parameters
+    # Load the checkpoint that corresponds to the ground truth
+    # The ground truth LDS values were computed using models_full[0]
     model = model_details["model"]
+    checkpoint = torch.load(model_details["models_full"][0], map_location=device)
+    model.load_state_dict(checkpoint)
+    model.to(device)
+    model.eval()
+    print(f"Loaded checkpoint: {model_details['models_full'][0]}")
+
+    # Count model parameters
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     model_type = "musictransformer" if model_name == "musictransformer" else "default"
 
@@ -653,8 +661,16 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print("="*60 + "\n")
 
-    # Define search spaces
-    lambda_values = [1e-2, 1e-1, 1e0, 1e1]
+    # Define search spaces based on dataset/model
+    if args.dataset == "cifar2" and args.model == "resnet9":
+        # CIFAR2+ResNet9: lambda from 10^{-8} to 10^3
+        lambda_values = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3]
+    elif args.dataset == "mnist" and args.model == "mlp":
+        # MNIST+MLP: lambda from 10^{-8} to 10^1
+        lambda_values = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1]
+    else:
+        # MNIST+LR: lambda from 10^{-4} to 10^3
+        lambda_values = [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3]
     m_values = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
 
     # Run experiment

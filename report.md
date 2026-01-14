@@ -32,6 +32,16 @@ We first investigate the spectrum sandwich bound. The experimental procedure is:
 3. For each $(m, \lambda)$ pair, compute both exact scores $\phi_{\lambda}$ and sketched scores $\widetilde{\phi}_{\lambda}$
 4. Measure the empirical approximation error $\epsilon = |\widetilde{\phi}_{\lambda} / \phi_{\lambda} - 1|$
 
+#### Test Gradient Selection
+
+The experiment supports two modes for selecting test gradients:
+
+- **Self-influence mode** (`--test_mode self`): Uses training gradients as test vectors, computing diagonal self-scores $\phi_\lambda(g_i, g_i)$. Error is aggregated over $k$ self-scores.
+
+- **Held-out mode** (`--test_mode held_out`): Uses held-out test set gradients, computing the full cross-score matrix $\phi_\lambda(g_{\text{train}}, g_{\text{test}})$ of shape $(n_{\text{train}}, k_{\text{test}})$. Error is aggregated over all $n \times k$ scores, giving the worst-case error across all (train, test) pairs.
+
+For held-out mode, this provides a more realistic evaluation since in practice we compute influence of training samples on test samples.
+
 We plot the following:
 
 1. **$m / d_{\lambda}$ vs. $\epsilon$**: We expect this to follow a straight line with slope $-1/2$ in log-log plot, validating $\epsilon \propto 1/\sqrt{m/d_{\lambda}}$.
