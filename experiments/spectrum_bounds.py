@@ -670,9 +670,10 @@ def run_experiment(
 
     # Collect all unique m values and build config mapping
     # m_to_configs: m -> list of config dicts
-    # all_config_ratios: (m, lamb, mult) -> list of ratios (accumulated across trials)
+    # per_trial_stats: (m, lamb, mult) -> {trial_idx: {stats dict}}
+    # This enables computing confidence intervals across trials in visualization
     m_to_configs = {}
-    all_config_ratios = {}
+    per_trial_stats = {}
 
     for lamb in valid_lambdas:
         d_lambda = eff_dims[lamb]
@@ -690,7 +691,7 @@ def run_experiment(
                 "m_raw": m_raw,
                 "m_clamped": m_clamped,
             })
-            all_config_ratios[(m, lamb, mult)] = []
+            per_trial_stats[(m, lamb, mult)] = {}
 
     m_values_sorted = sorted(m_to_configs.keys())
     print(f"\nUnique projection dimension to test: {len(m_values_sorted)}")
@@ -729,6 +730,7 @@ def run_experiment(
             # Compute bounds for each lambda using precomputed Woodbury quantities
             for config in configs:
                 lamb = config["lamb"]
+                mult = config["mult"]
                 if test_mode == "self":
                     bounds = compute_sandwich_bounds(
                         lamb=lamb,
@@ -738,7 +740,19 @@ def run_experiment(
                     )
                     ratios = bounds["ratios"].numpy()
                     valid_ratios = ratios[~np.isnan(ratios)].flatten()
-                    all_config_ratios[(m, lamb, config["mult"])].extend(valid_ratios.tolist())
+                    # Compute per-trial statistics (epsilon = |ratio - 1| for self mode)
+                    eps_values = np.abs(valid_ratios - 1)
+                    per_trial_stats[(m, lamb, mult)][trial] = {
+                        "mean_ratio": np.mean(valid_ratios),
+                        "std_ratio": np.std(valid_ratios),
+                        "min_ratio": np.min(valid_ratios),
+                        "max_ratio": np.max(valid_ratios),
+                        "eps_mean": np.mean(eps_values),
+                        "eps_max": np.max(eps_values),
+                        "eps_95": np.percentile(eps_values, 95),
+                        "eps_99": np.percentile(eps_values, 99),
+                        "n_samples": len(valid_ratios),
+                    }
                 else:
                     # test mode: pass self-influence scores for normalization
                     bounds = compute_sandwich_bounds(
@@ -749,10 +763,17 @@ def run_experiment(
                         train_self_scores=train_self_scores_by_lambda[lamb],
                         test_self_scores=test_self_scores_by_lambda[lamb],
                     )
-                    # For test mode, we store epsilon (normalized additive error) instead of ratios
+                    # For test mode, epsilon is already the normalized additive error
                     epsilon = bounds["epsilon"].numpy()
                     valid_epsilon = epsilon[~np.isnan(epsilon)].flatten()
-                    all_config_ratios[(m, lamb, config["mult"])].extend(valid_epsilon.tolist())
+                    per_trial_stats[(m, lamb, mult)][trial] = {
+                        "eps_mean": np.mean(valid_epsilon),
+                        "eps_max": np.max(valid_epsilon),
+                        "eps_median": np.median(valid_epsilon),
+                        "eps_95": np.percentile(valid_epsilon, 95),
+                        "eps_99": np.percentile(valid_epsilon, 99),
+                        "n_samples": len(valid_epsilon),
+                    }
 
     # Build results dict with metadata and aggregated experiment results
     print("Aggregating results...")
@@ -766,6 +787,7 @@ def run_experiment(
         "batch_size": batch_size,
         "min_m": min_m,
         "min_d_lambda": min_d_lambda,
+        "num_trials": num_trials,
         "skipped_configs": [
             {"lambda": lamb, "d_lambda": eff_dims[lamb],
              "reason": f"d_lambda ({eff_dims[lamb]:.2f}) < min_d_lambda ({min_d_lambda})"}
@@ -780,20 +802,24 @@ def run_experiment(
 
     for m, configs in m_to_configs.items():
         for config in configs:
-            values_list = all_config_ratios[(m, config["lamb"], config["mult"])]
-            if len(values_list) == 0:
+            trial_stats = per_trial_stats[(m, config["lamb"], config["mult"])]
+            if len(trial_stats) == 0:
                 continue
 
-            # Aggregate statistics across all samples and trials
-            # - For self mode: k samples × num_trials values (these are ratios)
-            # - For test mode: (n × k) samples × num_trials values (these are epsilon values)
-            all_values = np.array(values_list)
+            # Aggregate statistics across trials
+            # Each trial has its own statistics computed over k (or n×k) samples
+            # We compute mean ± std across trials for confidence intervals
+            trial_list = list(trial_stats.values())
+            n_trials = len(trial_list)
 
             if test_mode == "self":
-                # For self mode: all_values are ratios, compute epsilon = |ratio - 1|
-                eps_values = np.abs(all_values - 1)
+                # Extract per-trial values
+                trial_mean_ratios = np.array([t["mean_ratio"] for t in trial_list])
+                trial_eps_means = np.array([t["eps_mean"] for t in trial_list])
+                trial_eps_maxs = np.array([t["eps_max"] for t in trial_list])
+                trial_eps_95s = np.array([t["eps_95"] for t in trial_list])
+                trial_eps_99s = np.array([t["eps_99"] for t in trial_list])
 
-                # Build result by extending config with computed statistics
                 results["experiments"].append({
                     "m": m,
                     "lambda": config["lamb"],
@@ -802,22 +828,30 @@ def run_experiment(
                     "m_raw": config["m_raw"],
                     "m_clamped": config["m_clamped"],
                     "m_over_d_lambda": m / config["d_lambda"] if config["d_lambda"] > 0 else float('inf'),
-                    # Ratio statistics (for self mode)
-                    "mean_ratio": np.mean(all_values),
-                    "std_ratio": np.std(all_values),
-                    "min_ratio": np.min(all_values),
-                    "max_ratio": np.max(all_values),
-                    # Epsilon statistics (|ratio - 1| for self mode)
-                    "empirical_eps_max": np.max(eps_values),
-                    "empirical_eps_mean": np.mean(eps_values),
-                    "empirical_eps_std": np.std(eps_values),
-                    "empirical_eps_95": np.percentile(eps_values, 95),
-                    "empirical_eps_99": np.percentile(eps_values, 99),
-                    "n_samples": len(all_values),
+                    "n_trials": n_trials,
+                    # Per-trial statistics (for CI computation in visualization)
+                    "per_trial": trial_stats,
+                    # Aggregate ratio statistics across trials
+                    "mean_ratio": np.mean(trial_mean_ratios),
+                    "mean_ratio_std": np.std(trial_mean_ratios, ddof=1) if n_trials > 1 else 0.0,
+                    # Aggregate epsilon statistics across trials (mean ± std for CIs)
+                    "empirical_eps_mean": np.mean(trial_eps_means),
+                    "empirical_eps_mean_std": np.std(trial_eps_means, ddof=1) if n_trials > 1 else 0.0,
+                    "empirical_eps_max": np.mean(trial_eps_maxs),
+                    "empirical_eps_max_std": np.std(trial_eps_maxs, ddof=1) if n_trials > 1 else 0.0,
+                    "empirical_eps_95": np.mean(trial_eps_95s),
+                    "empirical_eps_95_std": np.std(trial_eps_95s, ddof=1) if n_trials > 1 else 0.0,
+                    "empirical_eps_99": np.mean(trial_eps_99s),
+                    "empirical_eps_99_std": np.std(trial_eps_99s, ddof=1) if n_trials > 1 else 0.0,
                 })
             else:
-                # For test mode: all_values are already epsilon (normalized additive error)
-                # No ratio statistics - use epsilon directly
+                # Test mode: epsilon is already the normalized additive error
+                trial_eps_means = np.array([t["eps_mean"] for t in trial_list])
+                trial_eps_maxs = np.array([t["eps_max"] for t in trial_list])
+                trial_eps_medians = np.array([t["eps_median"] for t in trial_list])
+                trial_eps_95s = np.array([t["eps_95"] for t in trial_list])
+                trial_eps_99s = np.array([t["eps_99"] for t in trial_list])
+
                 results["experiments"].append({
                     "m": m,
                     "lambda": config["lamb"],
@@ -826,15 +860,20 @@ def run_experiment(
                     "m_raw": config["m_raw"],
                     "m_clamped": config["m_clamped"],
                     "m_over_d_lambda": m / config["d_lambda"] if config["d_lambda"] > 0 else float('inf'),
-                    # Epsilon statistics (normalized additive error for test mode)
-                    # Based on Theorem 1 Eq (2): ε = |B̃ - B| / (√φ_λ(g) * √φ_λ(v))
-                    "empirical_eps_max": np.max(all_values),
-                    "empirical_eps_mean": np.mean(all_values),
-                    "empirical_eps_std": np.std(all_values),
-                    "empirical_eps_median": np.median(all_values),
-                    "empirical_eps_95": np.percentile(all_values, 95),
-                    "empirical_eps_99": np.percentile(all_values, 99),
-                    "n_samples": len(all_values),
+                    "n_trials": n_trials,
+                    # Per-trial statistics (for CI computation in visualization)
+                    "per_trial": trial_stats,
+                    # Aggregate epsilon statistics across trials (mean ± std for CIs)
+                    "empirical_eps_mean": np.mean(trial_eps_means),
+                    "empirical_eps_mean_std": np.std(trial_eps_means, ddof=1) if n_trials > 1 else 0.0,
+                    "empirical_eps_max": np.mean(trial_eps_maxs),
+                    "empirical_eps_max_std": np.std(trial_eps_maxs, ddof=1) if n_trials > 1 else 0.0,
+                    "empirical_eps_median": np.mean(trial_eps_medians),
+                    "empirical_eps_median_std": np.std(trial_eps_medians, ddof=1) if n_trials > 1 else 0.0,
+                    "empirical_eps_95": np.mean(trial_eps_95s),
+                    "empirical_eps_95_std": np.std(trial_eps_95s, ddof=1) if n_trials > 1 else 0.0,
+                    "empirical_eps_99": np.mean(trial_eps_99s),
+                    "empirical_eps_99_std": np.std(trial_eps_99s, ddof=1) if n_trials > 1 else 0.0,
                 })
     return results
 
