@@ -1,4 +1,4 @@
-# Projection-Regularization for Data Attribution at Scale
+# A Unified Theory of Random Projection for Influence Functions
 
 Experimental framework to validate theoretical claims about regularized sketching for Influence Functions.
 
