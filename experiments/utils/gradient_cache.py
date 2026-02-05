@@ -120,10 +120,6 @@ class GradientCache:
             self._prefetch_executor.shutdown(wait=False)
             self._prefetch_executor = None
 
-    def __del__(self):
-        """Cleanup on deletion."""
-        self.shutdown()
-
     # =========================================================================
     # Disk Storage Helpers
     # =========================================================================
@@ -194,85 +190,6 @@ class GradientCache:
             return data_cpu
         else:
             return data_cpu.to(device, non_blocking=self.pin_memory)
-
-    def _load_batch_to_cpu_pinned(self, batch_idx: int) -> Tensor:
-        """
-        Load a batch file to CPU with optional memory pinning.
-
-        Pinned memory enables faster CPU->GPU transfers via non-blocking copies.
-        """
-        batch_file = self._get_batch_file(batch_idx)
-        if not batch_file.exists():
-            raise FileNotFoundError(f"Batch file {batch_file} not found")
-
-        data = torch.load(batch_file, map_location="cpu", weights_only=True)
-
-        if self.pin_memory:
-            data = data.pin_memory()
-
-        return data
-
-    # =========================================================================
-    # Prefetching Methods (Disk Mode)
-    # =========================================================================
-
-    def _prefetch_batch(self, batch_idx: int):
-        """Submit a batch for background loading."""
-        if self._prefetch_executor is None or self.offload != "disk":
-            return
-
-        with self._prefetch_lock:
-            if batch_idx in self._prefetch_cache:
-                return  # Already prefetching or loaded
-
-            # Submit background load
-            future = self._prefetch_executor.submit(self._load_batch_to_cpu_pinned, batch_idx)
-            self._prefetch_cache[batch_idx] = future
-
-    def _get_prefetched_batch(self, batch_idx: int, device: str) -> Tensor:
-        """
-        Get a batch, using prefetched data if available.
-
-        If the batch was prefetched, retrieves it from the prefetch cache.
-        Otherwise, loads it synchronously.
-        """
-        with self._prefetch_lock:
-            cached = self._prefetch_cache.pop(batch_idx, None)
-
-        if cached is not None:
-            # Get result from future (blocks if not ready yet)
-            from concurrent.futures import Future
-            if isinstance(cached, Future):
-                data = cached.result()
-            else:
-                data = cached
-
-            # Transfer to target device (non-blocking if pinned)
-            if device != "cpu":
-                data = data.to(device, non_blocking=self.pin_memory)
-            return data
-
-        # Fallback to regular loading
-        return self._load_batch_from_disk(batch_idx, device)
-
-    def _prefetch_upcoming_batches(self, current_batch_idx: int, num_batches: int):
-        """Prefetch the next few batches in the background."""
-        n_batches = self.get_num_batch_files()
-        for i in range(1, self.prefetch_batches + 1):
-            next_idx = current_batch_idx + i
-            if next_idx < n_batches:
-                self._prefetch_batch(next_idx)
-
-    def load_batch_to_cpu(self, batch_idx: int) -> Tensor:
-        """
-        Load a batch file directly to CPU (bypasses LRU cache).
-
-        Used by algorithms that manage their own caching strategy.
-        """
-        batch_file = self._get_batch_file(batch_idx)
-        if not batch_file.exists():
-            raise FileNotFoundError(f"Batch file {batch_file} not found")
-        return torch.load(batch_file, map_location="cpu", weights_only=True)
 
     def _save_disk_metadata(self):
         """Save metadata to disk."""
@@ -602,41 +519,6 @@ class GradientCache:
     def get_num_batch_files(self) -> int:
         """Get number of storage batch files (disk mode only)."""
         return math.ceil(self.n_samples / self.storage_batch_size)
-
-    def get_batch_file_range(self, batch_idx: int) -> tuple:
-        """Get (start_idx, end_idx) for samples in a batch file."""
-        start = batch_idx * self.storage_batch_size
-        end = min(start + self.storage_batch_size, self.n_samples)
-        return start, end
-
-    def clear_cache(self):
-        """Clear the in-memory LRU cache (disk mode only)."""
-        self._disk_batch_cache.clear()
-
-    def to_list(self, device: str = "cpu") -> list:
-        """
-        Convert all gradients to a list of tensors.
-
-        Warning: This loads all gradients into memory. Use only when necessary
-        (e.g., for algorithms that require list-based random access).
-
-        Args:
-            device: Target device for the tensors (default: "cpu")
-
-        Returns:
-            List of gradient tensors, each of shape (dim,)
-        """
-        return [self.get_sample(i, device=device) for i in range(self.n_samples)]
-
-    def __len__(self) -> int:
-        """Return number of stored gradients."""
-        return self.n_samples
-
-    def __repr__(self) -> str:
-        return (
-            f"GradientCache(offload='{self.offload}', n_samples={self.n_samples}, "
-            f"dim={self.dim}, device='{self._storage_device}')"
-        )
 
 
 def create_gradient_cache(

@@ -156,32 +156,3 @@ def lds_gpu(score: Tensor, groundtruth: Tuple, device: str = "cuda") -> Tensor:
     lds_corr = spearman_correlation_gpu(sum_scores, gt_values, dim=0)
 
     return lds_corr
-
-
-def pearson_correlation_gpu(x: Tensor, y: Tensor, dim: int = 0) -> Tensor:
-    """
-    Compute Pearson correlation on GPU.
-
-    Args:
-        x: First tensor (n, k)
-        y: Second tensor (n, k)
-        dim: Dimension along which to compute correlation (default 0)
-
-    Returns:
-        Pearson correlations (k,) if dim=0, or (n,) if dim=1
-    """
-    x = x.double()
-    y = y.double()
-
-    x_centered = x - x.mean(dim=dim, keepdim=True)
-    y_centered = y - y.mean(dim=dim, keepdim=True)
-
-    covariance = (x_centered * y_centered).sum(dim=dim)
-    x_std = torch.sqrt((x_centered ** 2).sum(dim=dim))
-    y_std = torch.sqrt((y_centered ** 2).sum(dim=dim))
-
-    correlation = torch.zeros_like(covariance)
-    valid_mask = (x_std > 1e-10) & (y_std > 1e-10)
-    correlation[valid_mask] = covariance[valid_mask] / (x_std[valid_mask] * y_std[valid_mask])
-
-    return correlation.float()

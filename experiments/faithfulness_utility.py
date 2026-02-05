@@ -181,79 +181,6 @@ def compute_exact_gram_matrix(
     return eigenvalues, eigenvectors, K
 
 
-def compute_exact_self_scores(
-    grad_cache: GradientCache,
-    K: Tensor,
-    lambda_values: List[float],
-    device: str = "cuda",
-    batch_size: int = 64,
-    num_test_samples: int = 200,
-) -> Dict[float, Tensor]:
-    """
-    Compute exact self-influence scores for a subset of training samples.
-
-    Uses Woodbury identity for efficiency:
-        score_i = (1/λ)[||g_i||² - u_i^T (K + λI)^{-1} u_i]
-    where u_i = (1/√n) G @ g_i and K = (1/n) G @ G^T.
-
-    Args:
-        grad_cache: GradientCache containing the gradients
-        K: Pre-computed Gram matrix (n, n), normalized by 1/n, in float64
-        lambda_values: List of λ values
-        device: GPU device
-        batch_size: Batch size for streaming
-        num_test_samples: Number of samples to compute scores for
-
-    Returns:
-        Dictionary mapping λ -> exact self-scores tensor (num_test_samples,)
-    """
-    n = grad_cache.n_samples
-    k = min(num_test_samples, n)
-
-    print(f"  Computing exact self-scores for {k} samples...")
-
-    # Get test gradients (first k samples)
-    test_grads = []
-    for i in range(k):
-        test_grads.append(grad_cache.get_sample(i, device="cpu"))
-    V = torch.stack(test_grads).to(device=device, dtype=torch.float64)  # (k, d)
-
-    # Compute ||g_i||² for each test sample
-    g_norms_sq = (V ** 2).sum(dim=1)  # (k,)
-
-    # Compute U = (1/√n) G @ V^T, shape (n, k)
-    U = torch.zeros(n, k, device=device, dtype=torch.float64)
-    for i_start in tqdm(range(0, n, batch_size), desc="  Computing U", leave=False):
-        i_end = min(i_start + batch_size, n)
-        G_batch = grad_cache.get_batch(i_start, i_end, device=device).to(dtype=torch.float64)
-        U[i_start:i_end] = G_batch @ V.T
-
-    U.div_(n ** 0.5)
-
-    # Eigendecompose K for fast solves across λ
-    print(f"  Eigendecomposing K ({n}x{n})...")
-    eigenvalues, eigenvectors = torch.linalg.eigh(K)
-    eigenvalues = eigenvalues.clamp(min=0.0)
-
-    # Precompute W = U^T @ eigenvectors for fast λ sweep
-    W = eigenvectors.T @ U  # (n, k)
-
-    # Compute exact scores for each λ
-    exact_scores = {}
-    for lamb in lambda_values:
-        inv_eigvals = 1.0 / (eigenvalues + lamb)
-        # X = (K + λI)^{-1} @ U = eigenvectors @ (inv_eigvals * W)
-        X = eigenvectors @ (inv_eigvals.unsqueeze(1) * W)  # (n, k)
-
-        # score_i = (1/λ)[||g_i||² - u_i^T x_i]
-        ux_dots = (U * X).sum(dim=0)  # (k,)
-        scores = (g_norms_sq - ux_dots) / lamb
-
-        exact_scores[lamb] = scores.cpu()
-
-    return exact_scores
-
-
 def compute_exact_bilinear_scores(
     train_grad_cache: GradientCache,
     test_grads: Tensor,
@@ -466,180 +393,6 @@ def compute_sketched_bilinear_scores(
     gc.collect()
 
     return sketched_scores
-
-
-def compute_sketched_self_scores(
-    grad_cache: GradientCache,
-    projector,
-    lambda_values: List[float],
-    device: str = "cuda",
-    batch_size: int = 64,
-    num_test_samples: int = 200,
-) -> Dict[float, Tensor]:
-    """
-    Compute sketched self-influence scores for a subset of samples.
-
-    Args:
-        grad_cache: GradientCache containing the gradients
-        projector: Projector with .project() method
-        lambda_values: List of λ values
-        device: GPU device
-        batch_size: Batch size
-        num_test_samples: Number of samples to compute scores for
-
-    Returns:
-        Dictionary mapping λ -> sketched self-scores tensor (num_test_samples,)
-    """
-    n = grad_cache.n_samples
-    k = min(num_test_samples, n)
-    m = projector.proj_dim
-    d = grad_cache.dim
-
-    # Project test gradients
-    test_grads = []
-    for i in range(k):
-        test_grads.append(grad_cache.get_sample(i, device=device))
-    V = torch.stack(test_grads)  # (k, d)
-    PV = safe_project(V, projector, d, ensemble_id=0).to(dtype=torch.float64, device=device)  # (k, m)
-
-    # Compute ||Pg_i||² for each test sample
-    pv_norms_sq = (PV ** 2).sum(dim=1)  # (k,)
-
-    # Build projected Gram matrix and U
-    K_proj = torch.zeros(n, n, dtype=torch.float64, device=device)
-    U = torch.zeros(n, k, dtype=torch.float64, device=device)
-
-    # Project all gradients and build K_proj
-    pg_storage = []
-    for i_start in range(0, n, batch_size):
-        i_end = min(i_start + batch_size, n)
-        g_batch = grad_cache.get_batch(i_start, i_end, device=device)
-        pg_batch = safe_project(g_batch, projector, d, ensemble_id=0).to(dtype=torch.float64)
-        pg_storage.append(pg_batch.cpu())
-
-        # Compute U for this batch
-        U[i_start:i_end] = pg_batch @ PV.T
-
-    # Build K_proj from stored projections
-    for i, i_start in enumerate(range(0, n, batch_size)):
-        i_end = min(i_start + batch_size, n)
-        pg_i = pg_storage[i].to(device=device, dtype=torch.float64)
-
-        for j, j_start in enumerate(range(0, n, batch_size)):
-            j_end = min(j_start + batch_size, n)
-
-            if j < i:
-                continue
-            elif i == j:
-                K_proj[i_start:i_end, j_start:j_end] = pg_i @ pg_i.T
-            else:
-                pg_j = pg_storage[j].to(device=device, dtype=torch.float64)
-                block = pg_i @ pg_j.T
-                K_proj[i_start:i_end, j_start:j_end] = block
-                K_proj[j_start:j_end, i_start:i_end] = block.T
-
-    # Clean up
-    del pg_storage
-
-    # Normalize
-    K_proj.div_(n)
-    U.div_(n ** 0.5)
-
-    # Eigendecompose for fast λ sweep
-    eigenvalues, eigenvectors = torch.linalg.eigh(K_proj)
-    eigenvalues = eigenvalues.clamp(min=0.0)
-
-    W = eigenvectors.T @ U  # (n, k)
-
-    # Compute sketched scores for each λ
-    sketched_scores = {}
-    for lamb in lambda_values:
-        inv_eigvals = 1.0 / (eigenvalues + lamb)
-        X = eigenvectors @ (inv_eigvals.unsqueeze(1) * W)
-        ux_dots = (U * X).sum(dim=0)
-        scores = (pv_norms_sq - ux_dots) / lamb
-        sketched_scores[lamb] = scores.cpu()
-
-    return sketched_scores
-
-
-def compute_faithfulness_metrics(
-    exact_scores: Tensor,
-    sketched_scores: Tensor,
-    threshold: float = 0.1,
-) -> Dict:
-    """
-    Compute empirical faithfulness metrics for self-influence scores.
-
-    Args:
-        exact_scores: Exact influence scores (k,)
-        sketched_scores: Sketched influence scores (k,)
-        threshold: Threshold for defining "faithful" (default 0.1 = 10% error)
-
-    Returns:
-        Dictionary with faithfulness metrics
-    """
-    # Filter out near-zero scores to avoid numerical issues
-    exact_f64 = exact_scores.to(torch.float64)
-    sketched_f64 = sketched_scores.to(torch.float64)
-
-    max_score = exact_f64.abs().max()
-    relative_threshold = max(1e-10 * max_score.item(), 1e-12)
-    valid_mask = exact_f64.abs() > relative_threshold
-
-    if valid_mask.sum() == 0:
-        return {
-            "mean_ratio": float('nan'),
-            "std_ratio": float('nan'),
-            "correlation": float('nan'),
-            "mean_error": float('nan'),
-            "max_error": float('nan'),
-            "is_faithful": False,
-            "fraction_within_threshold": 0.0,
-            "n_valid": 0,
-        }
-
-    # Compute ratios
-    ratios = torch.zeros_like(exact_f64)
-    ratios[valid_mask] = sketched_f64[valid_mask] / exact_f64[valid_mask]
-    valid_ratios = ratios[valid_mask]
-
-    # Compute errors (|ratio - 1|)
-    errors = (valid_ratios - 1).abs()
-
-    # Compute correlation
-    valid_exact = exact_f64[valid_mask]
-    valid_sketched = sketched_f64[valid_mask]
-
-    mean_exact = valid_exact.mean()
-    mean_sketched = valid_sketched.mean()
-    cov = ((valid_exact - mean_exact) * (valid_sketched - mean_sketched)).mean()
-    std_exact = valid_exact.std()
-    std_sketched = valid_sketched.std()
-
-    if std_exact > 0 and std_sketched > 0:
-        correlation = (cov / (std_exact * std_sketched)).item()
-    else:
-        correlation = float('nan')
-
-    # Fraction of scores within threshold
-    within_threshold = (errors <= threshold).float().mean().item()
-
-    # Define faithful: mean ratio within [1-threshold, 1+threshold]
-    mean_ratio = valid_ratios.mean().item()
-    is_faithful = abs(mean_ratio - 1) <= threshold
-
-    return {
-        "mean_ratio": mean_ratio,
-        "std_ratio": valid_ratios.std().item(),
-        "correlation": correlation,
-        "mean_error": errors.mean().item(),
-        "max_error": errors.max().item(),
-        "p95_error": torch.quantile(errors, 0.95).item(),
-        "is_faithful": is_faithful,
-        "fraction_within_threshold": within_threshold,
-        "n_valid": valid_mask.sum().item(),
-    }
 
 
 def compute_bilinear_faithfulness_metrics(
@@ -1369,7 +1122,15 @@ def run_experiment(
         model=model_name, dataset=dataset, metric="lds"
     )
 
+    # Load the checkpoint that corresponds to the ground truth
+    # The ground truth LDS values were computed using models_full[0]
     model = model_details["model"]
+    checkpoint = torch.load(model_details["models_full"][0], map_location=device)
+    model.load_state_dict(checkpoint)
+    model.to(device)
+    model.eval()
+    print(f"Loaded checkpoint: {model_details['models_full'][0]}")
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     model_type = "musictransformer" if model_name == "musictransformer" else "default"
 

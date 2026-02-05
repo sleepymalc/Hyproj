@@ -23,72 +23,167 @@ pip install -r requirements.txt
 
 ### 1. Spectrum Bounds Validation (`spectrum_bounds.py`)
 
-**Purpose:** Validate that sketched scores approximate exact scores within (1±ε) bounds.
+**Purpose:** Validate that sketched influence scores approximate exact scores within theoretical error bounds.
 
 **What it measures:**
-- `ratio = sketched_score / exact_score` for test gradients
-- `ε_95 = 95th percentile of |ratio - 1|`
+- Two test modes:
+  - **Self-influence** (`--test_mode self`): Computes `ratio = sketched_score / exact_score` for training gradients
+  - **Cross-influence** (`--test_mode test`): Computes normalized additive error `ε = |B̃_λ - B_λ| / (√φ₀(g) × √φ₀(v))` for test gradients
+- `ε_95 = 95th percentile of error` across multiple random projection trials
+
+**Usage:**
+```bash
+# Basic run (self-influence mode)
+python experiments/spectrum_bounds.py --dataset mnist --model mlp
+
+# Cross-influence mode with test set gradients
+python experiments/spectrum_bounds.py --dataset mnist --model mlp --test_mode test
+
+# With more trials for statistical significance
+python experiments/spectrum_bounds.py --dataset mnist --model mlp --num_trials 10
+
+# Different projection type
+python experiments/spectrum_bounds.py --proj_type sjlt
+
+# Large model (disk-cached gradients)
+python experiments/spectrum_bounds.py --dataset maestro --model musictransformer --offload disk
+
+# Custom m and λ sweep ranges (powers of 2 for m, powers of 10 for λ)
+python experiments/spectrum_bounds.py --m_exp_min 5 --m_exp_max 18 --lambda_exp_min -6 --lambda_exp_max 0
+```
+
+**Key Arguments:**
+| Argument           | Description                                      | Default |
+| ------------------ | ------------------------------------------------ | ------- |
+| `--test_mode`      | Test mode: `self` or `test`                      | self    |
+| `--num_test_grads` | Number of test gradients to use                  | 500     |
+| `--num_trials`     | Number of random projection trials               | 5       |
+| `--min_d_lambda`   | Skip λ values where d_λ < this threshold         | 1.0     |
+| `--m_exp_min`      | Minimum m exponent (m = 2^exp)                   | 2       |
+| `--m_exp_max`      | Maximum m exponent (m = 2^exp)                   | 20      |
+| `--m_steps`        | Number of log-spaced m values (0 = powers of 2)  | 0       |
+| `--lambda_exp_min` | Minimum λ exponent (λ = 10^exp)                  | -8      |
+| `--lambda_exp_max` | Maximum λ exponent (λ = 10^exp)                  | 2       |
+| `--lambda_steps`   | Number of log-spaced λ values (0 = powers of 10) | 0       |
+
+### 2. Hyperparameter Selection (`hyperparam_selection.py`)
+
+**Purpose:** Compare theory-driven vs utility-driven hyperparameter selection strategies.
+
+**What it measures:**
+- LDS (Linear Datamodeling Score) as a function of λ and m
+- Optimal λ*(m) that maximizes validation LDS for each m
+- Test LDS for the selected hyperparameters
+- Whether m ≥ d_λ* is sufficient for good downstream utility
+
+**Two approaches:**
+1. **Theory-driven:** Choose m based on effective dimension d_λ (e.g., m ≈ d_λ / ε²)
+2. **Utility-driven:** Sweep λ to maximize validation LDS, then verify m ≥ d_λ*
+
+**Usage:**
+```bash
+# Basic run with validation/test split
+python experiments/hyperparam_selection.py --dataset mnist --model mlp
+
+# With more test samples and trials
+python experiments/hyperparam_selection.py --dataset mnist --model mlp \
+    --num_test_grads 1000 --num_trials 10
+
+# Custom validation ratio and m/λ sweeps
+python experiments/hyperparam_selection.py --dataset mnist --model mlp \
+    --val_ratio 0.15 --m_exp_min 6 --m_exp_max 18
+
+# Large model with disk offload
+python experiments/hyperparam_selection.py --dataset maestro --model musictransformer \
+    --offload disk --batch_size 8
+```
+
+**Key Arguments:**
+| Argument           | Description                                      | Default |
+| ------------------ | ------------------------------------------------ | ------- |
+| `--val_ratio`      | Fraction of test set for validation              | 0.1     |
+| `--num_test_grads` | Number of test samples (before val/test split)   | 500     |
+| `--num_trials`     | Number of random projection trials               | 5       |
+| `--m_exp_min`      | Minimum m exponent (m = 2^exp)                   | 5       |
+| `--m_exp_max`      | Maximum m exponent (m = 2^exp)                   | 20      |
+| `--m_steps`        | Number of log-spaced m values (0 = powers of 2)  | 0       |
+| `--lambda_exp_min` | Minimum λ exponent (λ = 10^exp)                  | -8      |
+| `--lambda_exp_max` | Maximum λ exponent (λ = 10^exp)                  | 2       |
+| `--lambda_steps`   | Number of log-spaced λ values (0 = powers of 10) | 0       |
+
+### 3. Faithfulness-Utility Alignment (`faithfulness_utility.py`)
+
+**Purpose:** Investigate whether maximizing downstream utility (LDS) leads to selecting hyperparameters in the empirically "unfaithful" region where sketched scores deviate significantly from exact scores.
+
+**Key Questions:**
+1. **Alignment:** For fixed m, does λ*(m) = argmax LDS(m, λ) fall in the unfaithful region?
+2. **Monotonicity:** Does the optimal utility LDS(m, λ*(m)) increase with m?
+
+**What it measures:**
+- Faithfulness: Normalized bilinear form error ε = |B̃_λ - B_λ| / (√φ₀(g) × √φ₀(v))
+- Utility: LDS on validation set (for λ selection) and test set (for final evaluation)
+- Per-m analysis: λ*(m), faithfulness at λ*(m), and test LDS
 
 **Usage:**
 ```bash
 # Basic run
-python spectrum_bounds.py --dataset mnist --model mlp
+python experiments/faithfulness_utility.py --dataset mnist --model mlp
 
-# With more trials
-python spectrum_bounds.py --dataset mnist --model mlp --num_trials 10
+# With stricter faithfulness threshold
+python experiments/faithfulness_utility.py --dataset mnist --model mlp \
+    --faithfulness_threshold 0.05
 
-# Different projection type
-python spectrum_bounds.py --proj_type sjlt
+# With more test samples and trials
+python experiments/faithfulness_utility.py --dataset mnist --model mlp \
+    --num_test_samples 1000 --num_trials 10
 
-# Large model (disk-cached gradients)
-python spectrum_bounds.py --dataset maestro --model musictransformer --offload disk
+# Custom validation split and m/λ sweeps
+python experiments/faithfulness_utility.py --dataset cifar2 --model resnet9 \
+    --val_ratio 0.15 --m_exp_min 8 --m_exp_max 18 --lambda_exp_min -6 --lambda_exp_max 0
 ```
 
-### 2. Hyperparameter Selection (`hyperparam_selection.py`)
+**Key Arguments:**
+| Argument                   | Description                                         | Default |
+| -------------------------- | --------------------------------------------------- | ------- |
+| `--faithfulness_threshold` | Threshold for empirical faithfulness (ε_95)         | 0.01    |
+| `--num_test_samples`       | Number of test samples for faithfulness measurement | 500     |
+| `--num_trials`             | Number of random projection trials                  | 5       |
+| `--val_ratio`              | Fraction of test set for validation                 | 0.1     |
+| `--m_exp_min`              | Minimum m exponent (m = 2^exp)                      | 5       |
+| `--m_exp_max`              | Maximum m exponent (m = 2^exp)                      | 20      |
+| `--m_steps`                | Number of log-spaced m values (0 = powers of 2)     | 0       |
+| `--lambda_exp_min`         | Minimum λ exponent (λ = 10^exp)                     | -8      |
+| `--lambda_exp_max`         | Maximum λ exponent (λ = 10^exp)                     | 2       |
+| `--lambda_steps`           | Number of log-spaced λ values (0 = powers of 10)    | 0       |
 
-**Purpose:** Compare theory-driven vs utility-driven hyperparameter selection.
+## Common Command-Line Arguments
 
-**What it measures:**
-- LDS vs $\lambda$ and $m$
-- Optimal $λ^{\ast}$ that maximizes LDS
-- Whether $m \geq d_\lambda^{\ast}$ is sufficient for good LDS
+These arguments are shared across all experiments:
 
-**Two approaches:**
-1. **Theory-driven:** Choose $m$ based on $d_\lambda : m \approx d_\lambda / \epsilon^2$
-2. **Utility-driven:** Sweep $\lambda$ to maximize LDS, then verify $m \geq d_\lambda^{\ast}$
-
-**Usage:**
-```bash
-python hyperparam_selection.py --dataset mnist --model mlp
-```
-
-## Command-Line Arguments
-
-| Argument       | Description                                  | Default      |
-| -------------- | -------------------------------------------- | ------------ |
-| `--dataset`    | Dataset: mnist, cifar2, maestro              | mnist        |
-| `--model`      | Model: lr, mlp, resnet9, musictransformer    | mlp          |
-| `--proj_type`  | Projection: normal, rademacher, sjlt         | normal       |
-| `--batch_size` | GPU batch size (tune for memory/utilization) | 32           |
-| `--offload`    | Gradient storage: none, cpu, disk            | cpu          |
-| `--cache_dir`  | Directory for disk cache                     | ./grad_cache |
-| `--output_dir` | Directory for results                        | ./results    |
-| `--seed`       | Random seed                                  | 42           |
-| `--device`     | cuda or cpu                                  | cuda         |
-
-### Additional Arguments for `spectrum_bounds.py`
-
-| Argument         | Description                              | Default |
-| ---------------- | ---------------------------------------- | ------- |
-| `--num_trials`   | Number of trials per configuration       | 5       |
-| `--min_m`        | Minimum projection dimension             | 1       |
-| `--min_d_lambda` | Skip λ values where d_λ < this threshold | 5.0     |
+| Argument       | Description                                  | Default                          |
+| -------------- | -------------------------------------------- | -------------------------------- |
+| `--dataset`    | Dataset: mnist, cifar2, maestro              | mnist                            |
+| `--model`      | Model: lr, mlp, resnet9, musictransformer    | mlp                              |
+| `--proj_type`  | Projection: normal, rademacher, sjlt         | normal                           |
+| `--batch_size` | GPU batch size (tune for memory/utilization) | 32 (16 for hyperparam_selection) |
+| `--offload`    | Gradient storage: none, cpu, disk            | cpu                              |
+| `--cache_dir`  | Directory for disk cache                     | ./grad_cache                     |
+| `--output_dir` | Directory for results                        | ./results                        |
+| `--seed`       | Random seed                                  | 42                               |
+| `--device`     | cuda or cpu                                  | cuda                             |
 
 ## Model/Dataset Configurations
 
-| Model            | Dataset | Parameters | Recommended Settings |
-| ---------------- | ------- | ---------- | -------------------- |
-| lr               | mnist   | ~8K        | `--offload none`     |
-| mlp              | mnist   | ~100K      | `--offload cpu`      |
-| resnet9          | cifar2  | ~6M        | `--offload cpu`      |
-| musictransformer | maestro | ~13M       | `--offload disk`     |
+| Model            | Dataset | Parameters | Recommended Settings                |
+| ---------------- | ------- | ---------- | ----------------------------------- |
+| lr               | mnist   | ~8K        | `--offload none` or `--offload cpu` |
+| mlp              | mnist   | ~100K      | `--offload cpu`                     |
+| resnet9          | cifar2  | ~6M        | `--offload cpu` or `--offload disk` |
+| musictransformer | maestro | ~13M       | `--offload disk --batch_size 8`     |
+
+### Offload Modes
+
+- **none**: Keep all gradients on GPU (fastest, but limited by GPU memory)
+- **cpu**: Store gradients in CPU RAM (good balance for most cases)
+- **disk**: Cache gradients to disk files (required for very large models, uses ~4GB RAM for LRU cache)
+-
