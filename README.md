@@ -178,12 +178,5 @@ These arguments are shared across all experiments:
 | ---------------- | ------- | ---------- | ----------------------------------- |
 | lr               | mnist   | ~8K        | `--offload none` or `--offload cpu` |
 | mlp              | mnist   | ~100K      | `--offload cpu`                     |
-| resnet9          | cifar2  | ~6M        | `--offload cpu` or `--offload disk` |
-| musictransformer | maestro | ~13M       | `--offload disk --batch_size 8`     |
+| resnet9          | cifar2  | ~6M        | `--offload cpu`                     |
 
-### Offload Modes
-
-- **none**: Keep all gradients on GPU (fastest, but limited by GPU memory)
-- **cpu**: Store gradients in CPU RAM (good balance for most cases)
-- **disk**: Cache gradients to disk files (required for very large models, uses ~4GB RAM for LRU cache)
--
