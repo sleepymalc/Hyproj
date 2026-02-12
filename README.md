@@ -180,3 +180,18 @@ These arguments are shared across all experiments:
 | mlp              | mnist   | ~100K      | `--offload cpu`                     |
 | resnet9          | cifar2  | ~6M        | `--offload cpu`                     |
 
+## Citations
+
+If you find this repository valuable, please give it a star! Got any questions or feedback? Feel free to open an issue. Using this in your work? Please reference us using the provided citation:
+
+```bibtex
+@misc{hu2026unified,
+      title={A Unified Theory of Random Projection for Influence Functions},
+      author={Pingbang Hu and Yuzheng Hu and Jiaqi W. Ma and Han Zhao},
+      year={2026},
+      eprint={2602.10449},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2602.10449},
+}
+```
